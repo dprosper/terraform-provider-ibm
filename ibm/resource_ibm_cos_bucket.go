@@ -2,6 +2,7 @@ package ibm
 
 import (
 	"fmt"
+	"log"
 	"regexp"
 	"strings"
 	"time"
@@ -180,6 +181,11 @@ func resourceIBMCOS() *schema.Resource {
 						},
 					},
 				},
+			},
+			"force_destroy": {
+				Type:     schema.TypeBool,
+				Optional: true,
+				Default:  false,
 			},
 		},
 	}
@@ -551,7 +557,54 @@ func resourceIBMCOSDelete(d *schema.ResourceData, meta interface{}) error {
 	}
 	_, err = s3Client.DeleteBucket(delete)
 	if err != nil {
-		return err
+		if strings.Contains(err.Error(), "BucketNotEmpty") {
+			if d.Get("force_destroy").(bool) {
+				log.Printf("[DEBUG] COS Bucket attempting to forceDestroy %+v", err)
+
+				continuationToken := ""
+				previousKey := ""
+
+				for {
+					listInput := &s3.ListObjectsV2Input{
+						Bucket:            aws.String(bucketName),
+						MaxKeys:           aws.Int64(25),
+						ContinuationToken: aws.String(continuationToken),
+						StartAfter:        aws.String(previousKey),
+					}
+
+					objects, err := s3Client.ListObjectsV2(listInput)
+					if err != nil {
+						return fmt.Errorf("s3Client.ListObjectsV2: %v", err)
+					}
+
+					for _, object := range objects.Contents {
+						key := *object.Key
+
+						deleteObjectInput := s3.DeleteObjectInput{
+							Bucket: aws.String(bucketName),
+							Key:    aws.String(key),
+						}
+						_, err = s3Client.DeleteObject(&deleteObjectInput)
+						if err != nil {
+							return fmt.Errorf("ERROR deleting object: %s", err)
+						}
+
+					}
+
+					if *objects.IsTruncated {
+						continuationToken = *objects.NextContinuationToken
+					} else {
+						break
+					}
+				}
+
+			} else {
+				log.Printf("[DEBUG] COS Bucket no forceDestroy %+v", err)
+				return err
+			}
+		} else {
+			return err
+		}
 	}
 	d.SetId("")
 	return nil
